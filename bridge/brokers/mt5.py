@@ -81,8 +81,10 @@ class MT5Broker:
         with self._lock:
             self._ensure()
             raw = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
+            if raw is None:   # error, not "no positions" (that is an empty tuple)
+                raise RuntimeError(f"positions_get failed: {mt5.last_error()}")
             out = []
-            for p in raw or ():
+            for p in raw:
                 if p.magic != self.s.magic:
                     continue  # never touch manual trades or other EAs
                 out.append(Position(
@@ -160,3 +162,15 @@ class MT5Broker:
                 "type_filling": self._filling(pos.symbol),
             }
             return self._send(req)
+
+    def modify_sl(self, pos: Position, sl: float) -> OrderResult:
+        with self._lock:
+            self._ensure()
+            return self._send({
+                "action": mt5.TRADE_ACTION_SLTP,
+                "symbol": pos.symbol,
+                "position": pos.ticket,
+                "sl": float(sl),
+                "tp": float(pos.tp),
+                "magic": self.s.magic,
+            })

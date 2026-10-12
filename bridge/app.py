@@ -9,24 +9,32 @@ import hmac
 import json
 import time
 from contextlib import asynccontextmanager
+from dataclasses import asdict
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from .brokers import make_broker
 from .config import Settings
 from .engine import Engine, Result
 from .journal import Journal
+from .manager import TradeManager
+from .notifier import Notifier, format_result
 from .signals import SignalError, parse_alert
+
+DASHBOARD = Path(__file__).parent / "static" / "dashboard.html"
 
 # Addresses TradingView sends webhooks from (https://www.tradingview.com/support/solutions/43000529348).
 TRADINGVIEW_IPS = ["52.89.214.238", "34.212.75.30", "54.218.53.128", "52.32.178.7"]
 
 
-def create_app(settings: Settings, broker=None) -> FastAPI:
+def create_app(settings: Settings, broker=None, notifier: Notifier | None = None) -> FastAPI:
     broker = broker or make_broker(settings)
     engine = Engine(settings, broker)
     journal = Journal(settings.journal_path)
+    notifier = notifier or Notifier(settings.telegram_bot_token, settings.telegram_chat_id)
+    manager = TradeManager(settings, broker, journal, notifier)
     seen: dict[str, float] = {}
     allow = [ip for ip in settings.ip_allowlist if ip.lower() != "tradingview"]
     if any(ip.lower() == "tradingview" for ip in settings.ip_allowlist):
@@ -37,10 +45,13 @@ def create_app(settings: Settings, broker=None) -> FastAPI:
         broker.connect()
         mode = "DRY RUN (no real orders)" if settings.dry_run else "LIVE TRADING"
         print(f"Bridge ready: broker={settings.broker} mode={mode} symbols={settings.allowed_symbols}")
+        notifier.send(f"🤖 Bridge started - {mode}")
+        manager.start()
         yield
+        manager.stop()
 
     app = FastAPI(title="TradingView -> MT5 bridge", lifespan=lifespan)
-    app.state.engine, app.state.journal = engine, journal
+    app.state.engine, app.state.journal, app.state.manager = engine, journal, manager
 
     def _auth(token: str | None) -> None:
         if not token or not hmac.compare_digest(token, settings.webhook_token):
@@ -102,6 +113,13 @@ def create_app(settings: Settings, broker=None) -> FastAPI:
             res = Result("error", f"{type(e).__name__}: {e}")
         journal.log(ip, logged, sig.__dict__, res.status, res.to_dict())
         print(f"[{res.status}] {sig.action} {sig.symbol}: {res.reason}")
+        if res.status in ("filled", "partial"):
+            try:
+                manager.register(res)
+            except Exception as e:
+                print(f"could not register trade group: {e}")
+        if res.status != "skipped" and (res.status != "rejected" or settings.notify_rejected):
+            notifier.send(format_result(sig, res))
         return res.to_dict()
 
     @app.get("/health")
@@ -131,6 +149,7 @@ def create_app(settings: Settings, broker=None) -> FastAPI:
             for sym in {p.symbol for p in broker.positions()}:
                 closed.append(engine._close_all(sym, "halt").to_dict())
         journal.log(None, "", None, "halted", {"close_all": close_all, "closed": closed})
+        notifier.send("🛑 Trading HALTED" + (" and all positions closed" if close_all else ""))
         return {"halted": True, "closed": closed}
 
     @app.post("/resume")
@@ -138,6 +157,36 @@ def create_app(settings: Settings, broker=None) -> FastAPI:
         _auth(token)
         engine.halted = False
         journal.log(None, "", None, "resumed", {})
+        notifier.send("▶️ Trading resumed")
         return {"halted": False}
+
+    @app.get("/dashboard", include_in_schema=False)
+    def dashboard():
+        # The page holds no data; it asks /api/status with the token you type in.
+        return FileResponse(DASHBOARD, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/status")
+    def status(token: str):
+        _auth(token)
+        out = {
+            "dry_run": settings.dry_run, "halted": engine.halted, "broker": settings.broker,
+            "limits": {"risk_percent": settings.risk_percent, "fixed_lot": settings.fixed_lot,
+                       "max_daily_loss_percent": settings.max_daily_loss_percent},
+            "account": None, "connected": False, "positions": [],
+            "today": {"realized": 0.0, "floating": 0.0},
+            "journal": journal.recent(15), "error": None,
+        }
+        try:
+            positions = broker.positions()
+            out.update(
+                connected=broker.is_connected(),
+                account=asdict(broker.account()),
+                positions=[asdict(p) for p in positions],
+                today={"realized": broker.today_realized_pnl(),
+                       "floating": sum(p.profit for p in positions)},
+            )
+        except Exception as e:
+            out["error"] = f"broker: {e}"
+        return out
 
     return app

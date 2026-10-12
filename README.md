@@ -34,7 +34,12 @@ TradingView alert ──HTTPS webhook──▶ bridge (Python, on a Windows PC/V
    the same SL.
 7. An opposite signal closes the open trades first. A `close` alert closes everything on that
    symbol.
-8. Logs everything to `journal.db`. You can view it at `/journal?token=...`.
+8. **Break-even:** once TP1 is hit, the SL on the TP2/TP3 positions moves to the entry price, so
+   the rest of the trade can no longer lose. This needs an Exness **hedging** account (the
+   default), so that each TP is its own position.
+9. **Telegram:** sends a message to your phone for every trade, rejection, break-even move, closed
+   trade and halt.
+10. Logs everything to `journal.db`. You can view it at `/journal?token=...`.
 
 The bridge only touches positions carrying its own magic number. **Manual trades are never
 modified.**
@@ -116,10 +121,33 @@ the indicator's message looks different, adjust the alert (or the parser in `bri
 - [ ] You know the kill switch (below).
 - [ ] Then set `DRY_RUN=false`, point MT5 to the live account, and restart.
 
+## Dashboard
+
+Open `https://YOUR-TUNNEL-URL/dashboard#token=YOUR_WEBHOOK_TOKEN` on your phone and bookmark it.
+The page shows:
+
+- mode (dry-run or live) and connection status,
+- balance, equity and today's P/L,
+- open positions and the latest alerts, with the reason each one was taken or skipped,
+- **Halt**, **Resume** and **Halt & close all** buttons.
+
+It refreshes every 10 seconds. The token goes after `#`, so it is never sent to the server logs
+or the tunnel.
+
+## Telegram alerts
+
+1. In Telegram, message **@BotFather**, send `/newbot` and follow the steps. Copy the bot token.
+2. Send your new bot any message. Then open
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser and copy the number after
+   `"chat":{"id":`.
+3. Put both values in `.env` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) and restart. You get a
+   "Bridge started" message straight away.
+
 ## Kill switch & monitoring
 
 | Action | Request |
 |---|---|
+| Dashboard (phone) | `/dashboard#token=TOKEN` |
 | Status / balance | `GET /health` |
 | Last alerts & results | `GET /journal?token=TOKEN&limit=50` |
 | Stop opening trades | `POST /halt?token=TOKEN` |
@@ -143,6 +171,9 @@ All settings live in `.env`; `.env.example` documents every one. The key ones:
 | `MAX_SPREAD_PCT_OF_SL` | `0.15` | Skip if spread > 15% of the stop distance |
 | `MAX_ENTRY_DRIFT_PCT_OF_SL` | `0.35` | Skip if price ran away from the alert entry |
 | `CLOSE_ON_OPPOSITE` | `true` | Opposite signal closes open trades |
+| `BREAKEVEN_AFTER_TP1` | `true` | Move SL to entry once TP1 is hit |
+| `BREAKEVEN_BUFFER_POINTS` | `0` | Lock in this many points of profit at break-even |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | – | Phone notifications |
 
 **About sizing on gold:** 1 lot = 100 oz, so a $34 stop (like the 4180 → 4215 example) costs
 about $3,460 per lot. At 0.5% risk on a $10,000 account ($50), that is only 0.01 lot: one position

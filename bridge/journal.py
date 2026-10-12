@@ -7,6 +7,10 @@ import threading
 from datetime import datetime, timezone
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 class Journal:
     def __init__(self, path: str):
         self._db = sqlite3.connect(path, check_same_thread=False)
@@ -22,13 +26,50 @@ class Journal:
                 detail TEXT
             )"""
         )
+        self._db.execute(
+            """CREATE TABLE IF NOT EXISTS trade_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                tickets TEXT NOT NULL,      -- JSON list, TP1 position first
+                be_done INTEGER NOT NULL DEFAULT 0,
+                closed INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
         self._db.commit()
 
+    # -- positions opened together by one signal ---------------------------
+    def add_group(self, symbol: str, side: str, tickets: list[int]) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO trade_groups (ts, symbol, side, tickets) VALUES (?,?,?,?)",
+                (_now(), symbol, side, json.dumps(tickets)),
+            )
+            self._db.commit()
+
+    def open_groups(self) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, ts, symbol, side, tickets, be_done FROM trade_groups WHERE closed = 0"
+            ).fetchall()
+        return [{"id": r[0], "ts": r[1], "symbol": r[2], "side": r[3],
+                 "tickets": json.loads(r[4]), "be_done": bool(r[5])} for r in rows]
+
+    def update_group(self, group_id: int, be_done: bool | None = None, closed: bool | None = None) -> None:
+        with self._lock:
+            if be_done is not None:
+                self._db.execute("UPDATE trade_groups SET be_done = ? WHERE id = ?", (int(be_done), group_id))
+            if closed is not None:
+                self._db.execute("UPDATE trade_groups SET closed = ? WHERE id = ?", (int(closed), group_id))
+            self._db.commit()
+
+    # -- event log -----------------------------------------------------------
     def log(self, ip: str | None, raw: str, signal: dict | None, status: str, detail: dict) -> None:
         with self._lock:
             self._db.execute(
                 "INSERT INTO events (ts, ip, raw, signal, status, detail) VALUES (?,?,?,?,?,?)",
-                (datetime.now(timezone.utc).isoformat(timespec="seconds"), ip, raw[:4000],
+                (_now(), ip, raw[:4000],
                  json.dumps(signal) if signal else None, status, json.dumps(detail)),
             )
             self._db.commit()

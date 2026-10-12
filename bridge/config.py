@@ -61,6 +61,14 @@ class Settings:
     max_spread_pct_of_sl: float = 0.15        # spread must be <= 15% of SL distance
     max_entry_drift_pct_of_sl: float = 0.35   # price may be <= 35% of SL distance from alert entry
 
+    breakeven_after_tp1: bool = True          # move SL to entry once TP1 is hit
+    breakeven_buffer_points: int = 0          # lock in this many points beyond entry
+    monitor_seconds: float = 5.0
+
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    notify_rejected: bool = True
+
     magic: int = 20261012
     deviation_points: int = 50
     dedup_seconds: int = 60
@@ -96,6 +104,12 @@ class Settings:
             close_on_opposite=_bool("CLOSE_ON_OPPOSITE", True),
             max_spread_pct_of_sl=_float("MAX_SPREAD_PCT_OF_SL", 0.15),
             max_entry_drift_pct_of_sl=_float("MAX_ENTRY_DRIFT_PCT_OF_SL", 0.35),
+            breakeven_after_tp1=_bool("BREAKEVEN_AFTER_TP1", True),
+            breakeven_buffer_points=int(os.getenv("BREAKEVEN_BUFFER_POINTS", "0")),
+            monitor_seconds=_float("MONITOR_SECONDS", 5.0),
+            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID") or None,
+            notify_rejected=_bool("NOTIFY_REJECTED", True),
             magic=int(os.getenv("MAGIC", "20261012")),
             deviation_points=int(os.getenv("DEVIATION_POINTS", "50")),
             dedup_seconds=int(os.getenv("DEDUP_SECONDS", "60")),

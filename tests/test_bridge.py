@@ -189,3 +189,96 @@ def test_halt_endpoint(client):
     r = client.post(f"/halt?token={TOKEN}&close_all=true").json()
     assert r["halted"] and r["closed"][0]["status"] == "closed"
     assert client.get("/health").json()["halted"] is True
+
+
+# ---------------------------------------------------------------- break-even manager
+from bridge.journal import Journal
+from bridge.manager import TradeManager
+from bridge.notifier import Notifier, format_result
+
+
+def _open_jackpot(**kw):
+    s = settings(**kw)
+    b = PaperBroker(balance=100_000)
+    n = Notifier(None, None)
+    m = TradeManager(s, b, Journal(":memory:"), n)
+    res = Engine(s, b).handle(parse_alert(JACKPOT_TEXT))
+    m.register(res)
+    return b, m, n, res
+
+
+def test_sl_moves_to_breakeven_after_tp1():
+    b, m, n, _ = _open_jackpot()
+    tp1, *rest = b.positions()
+    m.check_once()                                   # TP1 still open: nothing happens
+    assert all(p.sl == 4215.15 for p in b.positions())
+
+    b.set_price("XAUUSD", 4140.0)                    # price ran down through TP1
+    b.close_position(tp1)
+    m.check_once()
+    assert [p.sl for p in b.positions()] == [p.open_price for p in rest]
+    assert any("break-even" in x for x in n.sent)
+
+    n.sent.clear()
+    m.check_once()                                   # only done once
+    assert n.sent == []
+
+    for p in b.positions():
+        b.close_position(p)
+    m.check_once()
+    assert any("fully closed" in x for x in n.sent)
+    assert m.journal.open_groups() == []
+
+
+def test_breakeven_buffer_and_disable():
+    b, m, _, _ = _open_jackpot(breakeven_buffer_points=500)   # 0.5 on gold
+    b.set_price("XAUUSD", 4140.0)
+    tp1, *rest = b.positions()
+    b.close_position(tp1)
+    m.check_once()
+    assert [p.sl for p in b.positions()] == [round(p.open_price - 0.5, 3) for p in rest]
+
+    b, m, _, _ = _open_jackpot(breakeven_after_tp1=False)
+    b.close_position(b.positions()[0])
+    m.check_once()
+    assert all(p.sl == 4215.15 for p in b.positions())
+
+
+def test_breakeven_waits_when_price_back_at_entry():
+    b, m, _, _ = _open_jackpot()
+    b.close_position(b.positions()[0])               # price still at entry (4180.62)
+    m.check_once()
+    assert all(p.sl == 4215.15 for p in b.positions())
+    assert m.journal.open_groups()[0]["be_done"] is False
+    b.set_price("XAUUSD", 4150.0)
+    m.check_once()
+    assert m.journal.open_groups()[0]["be_done"] is True
+
+
+def test_telegram_message_format():
+    _, _, _, res = _open_jackpot()
+    text = format_result(parse_alert(JACKPOT_TEXT), res)
+    assert text.startswith("✅ FILLED: SELL XAUUSD")
+    assert "SL 4215.15" in text and "@ 4146.09" in text
+
+
+# ---------------------------------------------------------------- dashboard
+def test_dashboard_and_status(client):
+    page = client.get("/dashboard")
+    assert page.status_code == 200 and "Bridge Dashboard" in page.text
+    assert client.get("/api/status?token=nope").status_code == 401
+    client.post(f"/webhook?token={TOKEN}", content=JACKPOT_TEXT)
+    st = client.get(f"/api/status?token={TOKEN}").json()
+    assert st["connected"] and len(st["positions"]) == 3
+    assert st["journal"][0]["status"] == "filled"
+    assert st["account"]["balance"] == 100_000
+
+
+def test_webhook_registers_group_and_notifies():
+    n = Notifier(None, None)
+    with TestClient(create_app(settings(), PaperBroker(balance=100_000), n)) as c:
+        c.post(f"/webhook?token={TOKEN}", content=JACKPOT_TEXT)
+        assert len(c.app.state.journal.open_groups()) == 1
+        assert any("FILLED" in x for x in n.sent)
+        c.post(f"/halt?token={TOKEN}")
+        assert "HALTED" in n.sent[-1]

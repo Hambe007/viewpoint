@@ -70,5 +70,9 @@ class PaperBroker:
         self.balance += pos.profit
         return OrderResult(ok=True, ticket=pos.ticket, message="paper close")
 
+    def modify_sl(self, pos: Position, sl: float) -> OrderResult:
+        self._positions[pos.ticket].sl = sl
+        return OrderResult(ok=True, ticket=pos.ticket, message="paper modify")
+
     def today_realized_pnl(self) -> float:
         return self.realized

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bridge Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --green: #3fb950; --red: #f85149; --amber: #d29922; --blue: #58a6ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f6f8fa; --panel: #ffffff; --line: #d0d7de; --text: #1f2328; --muted: #656d76;
+            --green: #1a7f37; --red: #cf222e; --amber: #9a6700; --blue: #0969da; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 24px 0 8px; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+           border: 1px solid currentColor; }
+  .ok { color: var(--green); } .bad { color: var(--red); } .warn { color: var(--amber); } .info { color: var(--blue); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .tile .k { color: var(--muted); font-size: 12px; }
+  .tile .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+  button { font: inherit; font-weight: 600; padding: 10px 14px; border-radius: 8px; cursor: pointer;
+           border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  button.danger { border-color: var(--red); color: var(--red); }
+  button.go { border-color: var(--green); color: var(--green); }
+  .scroll { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: 0; }
+  td.sig { white-space: normal; }
+  .reason { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+  @media (max-width: 600px) { .wide { display: none; } th, td { padding: 8px 6px; } }
+  .empty { padding: 14px; color: var(--muted); }
+  #msg { margin-top: 12px; min-height: 1.4em; color: var(--muted); }
+  .login { max-width: 420px; margin: 15vh auto; display: grid; gap: 10px; }
+  input { font: inherit; padding: 10px; border-radius: 8px; border: 1px solid var(--line);
+          background: var(--panel); color: var(--text); }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script>
+// The token lives in the URL fragment (#token=...), which browsers never send to servers or logs.
+const params = new URLSearchParams(location.hash.slice(1));
+let token = params.get("token") || "";
+const app = document.getElementById("app");
+const fmt = (n, d = 2) => n == null ? "–" : Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const when = ts => { const d = new Date(ts); const t = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? t : d.toLocaleDateString([], { day: "numeric", month: "short" }) + " " + t; };
+const cls = n => n > 0 ? "ok" : n < 0 ? "bad" : "";
+const statusCls = { filled: "ok", closed: "ok", dry_run: "info", partial: "warn", skipped: "", rejected: "warn", error: "bad",
+                    unauthorized: "bad", forbidden: "bad", halted: "bad", resumed: "ok" };
+
+function loginForm(err) {
+  app.innerHTML = `<form class="login" id="f"><h1>Bridge dashboard</h1>
+    <input id="t" type="password" placeholder="WEBHOOK_TOKEN" autocomplete="current-password">
+    <button class="go">Open</button><div class="bad">${esc(err || "")}</div></form>`;
+  document.getElementById("f").onsubmit = e => {
+    e.preventDefault(); token = document.getElementById("t").value.trim();
+    location.hash = "token=" + encodeURIComponent(token); load();
+  };
+}
+
+async function api(path, method = "GET") {
+  const sep = path.includes("?") ? "&" : "?";
+  const r = await fetch(path + sep + "token=" + encodeURIComponent(token), { method });
+  if (r.status === 401) throw new Error("unauthorized");
+  if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  return r.json();
+}
+
+function render(d) {
+  const pnl = d.today.realized + d.today.floating;
+  const mode = d.dry_run ? `<span class="badge info">DRY RUN</span>` : `<span class="badge bad">LIVE</span>`;
+  const state = d.halted ? `<span class="badge bad">HALTED</span>` : `<span class="badge ok">TRADING</span>`;
+  const conn = d.connected ? `<span class="badge ok">MT5 connected</span>` : `<span class="badge bad">MT5 offline</span>`;
+  const pos = d.positions.length ? `<table><tr><th class="wide">Ticket</th><th>Symbol</th><th>Side</th><th>Lots</th><th>Open</th><th>SL</th><th>TP</th><th>P/L</th></tr>
+    ${d.positions.map(p => `<tr><td class="wide">${p.ticket}</td><td>${esc(p.symbol)}</td><td class="${p.side === "buy" ? "ok" : "bad"}">${p.side.toUpperCase()}</td>
+      <td>${p.volume}</td><td>${p.open_price}</td><td>${p.sl || "–"}</td><td>${p.tp || "–"}</td><td class="${cls(p.profit)}">${fmt(p.profit)}</td></tr>`).join("")}</table>`
+    : `<div class="empty">No open positions.</div>`;
+  const log = d.journal.length ? `<table><tr><th>Time</th><th>Status</th><th>Signal / detail</th></tr>
+    ${d.journal.map(e => `<tr><td>${esc(when(e.ts))}</td>
+      <td class="${statusCls[e.status] || ""}">${esc(e.status)}</td>
+      <td class="sig">${e.signal ? esc(`${e.signal.action.toUpperCase()} ${e.signal.symbol}`) : ""}
+        <span class="reason">${esc(e.detail?.reason || "")}</span></td></tr>`).join("")}</table>`
+    : `<div class="empty">No alerts received yet.</div>`;
+
+  app.innerHTML = `
+    <header><h1>TradingView → MT5</h1><div>${mode} ${state} ${conn}</div></header>
+    <div class="tiles">
+      <div class="tile"><div class="k">Balance</div><div class="v">${fmt(d.account?.balance)}</div></div>
+      <div class="tile"><div class="k">Equity</div><div class="v">${fmt(d.account?.equity)}</div></div>
+      <div class="tile"><div class="k">Today P/L</div><div class="v ${cls(pnl)}">${fmt(pnl)}</div></div>
+      <div class="tile"><div class="k">Daily loss limit</div><div class="v">${d.limits.max_daily_loss_percent}%</div></div>
+      <div class="tile"><div class="k">Risk / trade</div><div class="v">${d.limits.fixed_lot ? d.limits.fixed_lot + " lot" : d.limits.risk_percent + "%"}</div></div>
+    </div>
+    <div class="buttons">
+      ${d.halted ? `<button class="go" data-act="resume">Resume trading</button>`
+                 : `<button class="danger" data-act="halt">Halt new trades</button>`}
+      <button class="danger" data-act="closeall">Halt &amp; close all</button>
+    </div>
+    <div id="msg">${d.error ? `<span class="bad">${esc(d.error)}</span>` : `Updated ${new Date().toLocaleTimeString()}`}</div>
+    <h2>Open positions (${d.positions.length})</h2><div class="scroll">${pos}</div>
+    <h2>Recent alerts</h2><div class="scroll">${log}</div>`;
+
+  app.querySelectorAll("button[data-act]").forEach(b => b.onclick = async () => {
+    const act = b.dataset.act;
+    if (act === "closeall" && !confirm("Stop trading and close ALL bridge positions now?")) return;
+    const path = act === "resume" ? "/resume" : act === "halt" ? "/halt" : "/halt?close_all=true";
+    try { await api(path, "POST"); } catch (e) { alert(e.message); }
+    load();
+  });
+}
+
+async function load() {
+  if (!token) return loginForm();
+  try { render(await api("/api/status")); }
+  catch (e) { if (e.message === "unauthorized") { token = ""; loginForm("Wrong token"); }
+              else { const m = document.getElementById("msg"); if (m) m.innerHTML = `<span class="bad">${esc(e.message)}</span>`; else loginForm(e.message); } }
+}
+load();
+setInterval(() => { if (token) load(); }, 10000);
+</script>
+</body>
+</html>
